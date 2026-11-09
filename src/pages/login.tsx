@@ -1,57 +1,109 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useLogin } from "@refinedev/core";
 
 import { CredentialResponse } from "../interfaces/google";
 
-// Todo: Update your Google Client ID here
 const GOOGLE_CLIENT_ID =
-  "1041339102270-e1fpe2b6v6u1didfndh7jkjmpcashs4f.apps.googleusercontent.com";
+  import.meta.env.VITE_GOOGLE_CLIENT_ID;
+
+let googleScriptLoad: Promise<void> | undefined;
+
+const loadGoogleIdentityServices = (): Promise<void> => {
+  if (window.google) {
+    return Promise.resolve();
+  }
+
+  if (!googleScriptLoad) {
+    googleScriptLoad = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = "https://accounts.google.com/gsi/client";
+      script.async = true;
+      script.defer = true;
+      script.onload = () => {
+        if (window.google) {
+          resolve();
+        } else {
+          reject(new Error("Google Sign-In did not initialize."));
+        }
+      };
+      script.onerror = () => reject(new Error("Google Sign-In could not load."));
+      document.head.appendChild(script);
+    });
+  }
+
+  return googleScriptLoad;
+};
 
 export const Login: React.FC = () => {
   const { mutate: login } = useLogin<CredentialResponse>();
+  const loginRef = useRef(login);
+  const buttonRef = useRef<HTMLDivElement>(null);
+  const [loadError, setLoadError] = useState<string>();
+  loginRef.current = login;
 
-  const GoogleButton = () => {
-    const divRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    let active = true;
 
-    useEffect(() => {
-      if (typeof window === "undefined" || !window.google || !divRef.current) {
-        return;
-      }
+    if (!GOOGLE_CLIENT_ID) {
+      setLoadError(
+        "Не задан VITE_GOOGLE_CLIENT_ID. Добавьте ID клиента Google в .env и перезапустите сервер."
+      );
+      return () => {
+        active = false;
+      };
+    }
 
-      try {
+    loadGoogleIdentityServices()
+      .then(() => {
+        if (!active || !buttonRef.current) {
+          return;
+        }
+
         window.google.accounts.id.initialize({
           ux_mode: "popup",
           client_id: GOOGLE_CLIENT_ID,
-          callback: async (res: CredentialResponse) => {
-            if (res.credential) {
-              login(res);
+          callback: (response: CredentialResponse) => {
+            if (response.credential) {
+              loginRef.current(response);
             }
           },
         });
-        window.google.accounts.id.renderButton(divRef.current, {
+        window.google.accounts.id.renderButton(buttonRef.current, {
           theme: "filled_blue",
           size: "medium",
           type: "standard",
         });
-      } catch (error) {
-        console.log(error);
-      }
-    }, []);
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          console.error("Failed to load Google Sign-In.", error);
+          setLoadError(
+            "Не удалось загрузить вход через Google. Обновите страницу и попробуйте снова."
+          );
+        }
+      });
 
-    return <div ref={divRef} />;
-  };
+    return () => {
+      active = false;
+    };
+  }, []);
 
   return (
     <div
       style={{
-        height: "100vh",
+        minHeight: "100vh",
         display: "flex",
         justifyContent: "center",
         alignItems: "center",
         flexDirection: "column",
+        padding: "24px",
+        textAlign: "center",
       }}
     >
-      <GoogleButton />
+      <h1>Вход в панель управления</h1>
+      <p>Войдите через Google, чтобы открыть запрошенную страницу.</p>
+      <div ref={buttonRef} />
+      {loadError && <p role="alert">{loadError}</p>}
       <p>
         Powered by
         <img

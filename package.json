@@ -4,41 +4,51 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@neondatabase/serverless": "^1.2.0",
     "@refinedev/cli": "^2.16.48",
     "@refinedev/core": "^5.0.8",
     "@refinedev/devtools": "^2.0.1",
     "@refinedev/kbar": "^2.0.0",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
-    "react-router": "^7.0.2",
-    "@refinedev/rest": "^2.1.0",
     "@refinedev/react-hook-form": "^5.0.0",
     "@refinedev/react-router": "^2.0.0",
     "@refinedev/react-table": "^6.0.0",
+    "@refinedev/rest": "^2.1.0",
     "@tanstack/react-table": "^8.2.6",
-    "axios": "^1.6.2"
+    "axios": "^1.6.2",
+    "dotenv": "^18.0.9",
+    "drizzle-orm": "^0.45.4",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-router": "^7.0.2"
   },
   "devDependencies": {
     "@eslint/js": "^9.25.0",
+    "@tailwindcss/vite": "^4.3.5",
     "@types/node": "^20",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@typescript-eslint/eslint-plugin": "^5.57.1",
     "@typescript-eslint/parser": "^5.57.1",
     "@vitejs/plugin-react": "^4.4.1",
+    "drizzle-kit": "^0.31.11",
     "eslint": "^9.25.0",
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.4.19",
     "globals": "^16.0.0",
+    "tailwindcss": "^4.3.5",
+    "typescript": "^5.8.3",
     "typescript-eslint": "^8.30.1",
-    "vite": "^6.3.5",
-    "typescript": "^5.8.3"
+    "vite": "^6.3.5"
   },
   "scripts": {
-    "dev": "refine dev",
+    "dev": "node scripts/dev.mjs",
+    "api": "node server.mjs",
     "build": "tsc && refine build",
     "start": "refine start",
-    "refine": "refine"
+    "refine": "refine",
+    "db:generate": "drizzle-kit generate",
+    "db:seed": "npx tsx src/db/seed.ts",
+    "db:push": "drizzle-kit push"
   },
   "browserslist": {
     "production": [

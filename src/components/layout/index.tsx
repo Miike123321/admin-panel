@@ -4,12 +4,12 @@ import { Menu } from "../menu";
 
 export const Layout: React.FC<PropsWithChildren> = ({ children }) => {
   return (
-    <div className="layout">
+    <div className="app-shell">
       <Menu />
-      <div className="content">
+      <main className="app-main">
         <Breadcrumb />
-        <div>{children}</div>
-      </div>
+        <div className="app-content">{children}</div>
+      </main>
     </div>
   );
 };
