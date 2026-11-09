@@ -1,37 +1,24 @@
-# This Dockerfile uses `serve` npm package to serve the static files with node process.
-# You can find the Dockerfile for nginx in the following link:
-# https://github.com/refinedev/dockerfiles/blob/main/vite/Dockerfile.nginx
-FROM refinedev/node:18 AS base
+FROM node:22-bookworm-slim AS builder
 
-FROM base as deps
+WORKDIR /app
 
-COPY package.json yarn.lock* package-lock.json* pnpm-lock.yaml* .npmrc* ./
-
-RUN \
-  if [ -f yarn.lock ]; then yarn --frozen-lockfile; \
-  elif [ -f package-lock.json ]; then npm ci; \
-  elif [ -f pnpm-lock.yaml ]; then yarn global add pnpm && pnpm i --frozen-lockfile; \
-  else echo "Lockfile not found." && exit 1; \
-  fi
-
-FROM base as builder
-
-ENV NODE_ENV production
-
-COPY --from=deps /app/refine/node_modules ./node_modules
+COPY package.json package-lock.json .npmrc ./
+RUN npm ci
 
 COPY . .
-
 RUN npm run build
 
-FROM base as runner
+FROM node:22-bookworm-slim AS runner
 
-ENV NODE_ENV production
+ENV NODE_ENV=production
+WORKDIR /app
 
-RUN npm install -g serve
+COPY package.json package-lock.json .npmrc ./
+RUN npm ci --omit=dev && npm cache clean --force
 
-COPY --from=builder /app/refine/dist ./
+COPY --from=builder /app/server.mjs ./server.mjs
+COPY --from=builder /app/dist ./dist
 
-USER refine
+USER node
 
-CMD ["serve"]
+CMD ["node", "server.mjs"]
