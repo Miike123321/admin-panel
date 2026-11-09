@@ -17,10 +17,10 @@ Refine's hooks and components simplifies the development process and eliminates 
 
 ## Available Scripts
 
-Authentication is disabled. The admin panel is accessible without signing in.
 The development command starts both the Vite app and a local tasks API connected
 to Neon via the server-only `DATABASE_URL` variable. The API listens on
-`127.0.0.1:3001` by default; set `API_PORT` in `.env` to change it.
+`127.0.0.1:3001` by default; set `API_PORT` in `.env` to change it. Local
+authentication is disabled unless `ADMIN_PASSWORD` is configured.
 The API also initializes the task completion points table on startup. Assigned
 responsibles earn 10 points the first time a task is completed; moving a task
 out of "Done" and completing it again does not award duplicate points.
@@ -30,9 +30,9 @@ in the `admin_integration_settings` Neon table using AES-256-GCM encryption.
 The encryption key is created locally at `~/.jarvis-admin/settings.key` with
 owner-only permissions and is never stored in Neon or returned by the API.
 Back up this key securely before moving the admin API to another host; without
-it, saved integration credentials cannot be decrypted. The settings API accepts
-requests only from localhost origins. Superset settings currently support a
-remote HTTPS MCP endpoint and are intended for read-only access.
+it, saved integration credentials cannot be decrypted. Superset settings
+currently support a remote HTTPS MCP endpoint and are intended for read-only
+access.
 
 Gemini is only used when **Help with description** is clicked in the task form.
 The API sends the draft and up to 10 recent, non-sensitive tasks from the same
@@ -68,6 +68,34 @@ permission to create issues in the selected repository.
 ```bash
     npm run start
 ```
+
+### Free hosting on Render
+
+The repository includes a Render Blueprint for a single Node service that serves
+the built app and API together. It uses the existing Neon database; no separate
+static host or paid domain is needed. Render's free web service may sleep after
+inactivity, so its first request after a pause can take longer. Render describes
+free instances as suitable for hobby projects and testing, not business-critical
+production workloads.
+
+1. Push this repository to GitHub and sign in to [Render](https://render.com/).
+2. In Render, choose **New → Blueprint**, select this GitHub repository, and
+   apply the `render.yaml` configuration.
+3. Enter the existing Neon connection string as `DATABASE_URL` in the private
+   environment-variable form. Do not put it in this repository or share it in
+   chat.
+4. Set `ADMIN_PASSWORD` to a unique password of at least 16 characters. Render
+   generates `SESSION_SECRET` and `JARVIS_SETTINGS_KEY`; keep those values
+   stable. Changing `JARVIS_SETTINGS_KEY` makes previously saved integration
+   credentials unreadable.
+5. After the first successful deploy, open the Render service URL and sign in.
+   Further pushes to the connected branch deploy automatically.
+
+The production server refuses to start without `DATABASE_URL`,
+`ADMIN_PASSWORD`, and a `SESSION_SECRET` of at least 32 characters. Keep the
+generated secrets in Render's environment settings and back them up securely.
+The health check at `/api/health` is public; application data and other API
+routes require the administrator session.
 
 ## Learn More
 

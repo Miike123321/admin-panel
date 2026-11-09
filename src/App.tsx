@@ -1,4 +1,5 @@
 import { ErrorComponent, Refine } from "@refinedev/core";
+import React, { useEffect, useState } from "react";
 import { RefineKbar, RefineKbarProvider } from "@refinedev/kbar";
 import { BrowserRouter, Outlet, Route, Routes } from "react-router";
 import routerProvider, {
@@ -25,9 +26,115 @@ import {
 import { KanbanPage } from "./pages/kanban";
 import { ResponsiblesPage } from "./pages/responsibles";
 import { SettingsPage } from "./pages/settings";
+import { API_URL } from "./providers/constants";
+
+const AuthGate: React.FC<React.PropsWithChildren> = ({ children }) => {
+  const [isChecking, setIsChecking] = useState(true);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [authRequired, setAuthRequired] = useState(false);
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const checkSession = async () => {
+    setIsChecking(true);
+    try {
+      const response = await fetch(`${API_URL}/auth/session`);
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.message ?? "Не удалось проверить вход.");
+      setAuthRequired(result.required);
+      setIsAuthenticated(!result.required || result.authenticated);
+      setError("");
+    } catch (sessionError) {
+      setError(sessionError instanceof Error ? sessionError.message : "Нет соединения с сервером.");
+    } finally {
+      setIsChecking(false);
+    }
+  };
+
+  useEffect(() => {
+    void checkSession();
+  }, []);
+
+  const handleLogin = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setIsSubmitting(true);
+    setError("");
+    try {
+      const response = await fetch(`${API_URL}/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.message ?? "Не удалось войти.");
+      setPassword("");
+      setIsAuthenticated(true);
+    } catch (loginError) {
+      setError(loginError instanceof Error ? loginError.message : "Не удалось войти.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      const response = await fetch(`${API_URL}/auth/logout`, { method: "POST" });
+      if (!response.ok) throw new Error("Не удалось завершить сеанс.");
+      setIsAuthenticated(false);
+    } catch (logoutError) {
+      setError(logoutError instanceof Error ? logoutError.message : "Не удалось завершить сеанс.");
+    }
+  };
+
+  if (isChecking) {
+    return <div className="auth-screen" role="status">Проверяем доступ…</div>;
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <main className="auth-screen">
+        <form className="auth-card" onSubmit={handleLogin}>
+          <div className="brand-mark">J</div>
+          <p className="page-eyebrow">ЗАЩИЩЁННЫЙ ДОСТУП</p>
+          <h1>J.A.R.V.I.S</h1>
+          <p>Введите пароль администратора, чтобы открыть рабочее пространство.</p>
+          <label className="task-field">
+            <span>Пароль</span>
+            <input
+              autoFocus
+              required
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              className="task-input"
+            />
+          </label>
+          {error && <p className="task-create-error" role="alert">{error}</p>}
+          <button className="modal-submit" type="submit" disabled={isSubmitting}>
+            {isSubmitting ? "Проверяем…" : "Войти"}
+          </button>
+        </form>
+      </main>
+    );
+  }
+
+  return (
+    <>
+      {children}
+      {authRequired && (
+        <button className="auth-logout-button" type="button" onClick={() => void handleLogout()}>
+          Выйти
+        </button>
+      )}
+    </>
+  );
+};
 
 function App() {
   return (
+    <AuthGate>
     <BrowserRouter>
       <RefineKbarProvider>
         <Refine
@@ -99,6 +206,7 @@ function App() {
         </Refine>
       </RefineKbarProvider>
     </BrowserRouter>
+    </AuthGate>
   );
 }
 

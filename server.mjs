@@ -1,18 +1,41 @@
 import "dotenv/config";
 import { createServer } from "node:http";
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  createHmac,
+  randomBytes,
+  timingSafeEqual,
+} from "node:crypto";
+import { createReadStream } from "node:fs";
+import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { neon } from "@neondatabase/serverless";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, extname, join, resolve, sep } from "node:path";
 
 const databaseUrl = process.env.DATABASE_URL;
+const statAsync = stat;
 
 if (!databaseUrl) {
   throw new Error("DATABASE_URL must be set to start the tasks API.");
 }
 
-const port = Number(process.env.API_PORT ?? 3001);
+const port = Number(process.env.PORT ?? process.env.API_PORT ?? 3001);
+const host = process.env.HOST ?? "0.0.0.0";
+const isProduction = process.env.NODE_ENV === "production";
+const adminPassword = process.env.ADMIN_PASSWORD ?? "";
+const sessionSecret = process.env.SESSION_SECRET ?? "";
+const authEnabled = Boolean(adminPassword);
+const sessionCookieName = "jarvis_admin_session";
+const sessionDurationMs = 12 * 60 * 60 * 1000;
+
+if (isProduction && (!adminPassword || adminPassword.length < 16 || sessionSecret.length < 32)) {
+  throw new Error("Production requires ADMIN_PASSWORD (16+ characters) and SESSION_SECRET (32+ characters).");
+}
+if (authEnabled && sessionSecret.length < 32) {
+  throw new Error("SESSION_SECRET must contain at least 32 characters when ADMIN_PASSWORD is set.");
+}
 
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error("API_PORT must be a valid TCP port.");
@@ -32,6 +55,13 @@ const settingsKeyPath =
   join(homedir(), ".jarvis-admin", "settings.key");
 
 const loadSettingsKey = async () => {
+  if (process.env.JARVIS_SETTINGS_KEY) {
+    if (process.env.JARVIS_SETTINGS_KEY.length < 32) {
+      throw new Error("JARVIS_SETTINGS_KEY must contain at least 32 characters.");
+    }
+    return createHash("sha256").update(process.env.JARVIS_SETTINGS_KEY).digest();
+  }
+
   await mkdir(dirname(settingsKeyPath), { recursive: true, mode: 0o700 });
   try {
     const key = await readFile(settingsKeyPath);
@@ -62,8 +92,10 @@ const loadSettingsKey = async () => {
 };
 
 const settingsKey = await loadSettingsKey();
-await chmod(dirname(settingsKeyPath), 0o700);
-await chmod(settingsKeyPath, 0o600);
+if (!process.env.JARVIS_SETTINGS_KEY) {
+  await chmod(dirname(settingsKeyPath), 0o700);
+  await chmod(settingsKeyPath, 0o600);
+}
 const encryptSettings = (settings) => {
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", settingsKey, iv);
@@ -102,8 +134,44 @@ const readIntegrationSettings = async () => {
   return row ? decryptSettings(row.encrypted_settings) : {};
 };
 
-const isAllowedSettingsOrigin = (origin) =>
-  !origin || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+const isAllowedSettingsOrigin = (request) => {
+  const origin = request.headers.origin;
+  if (!origin) return true;
+  if (!isProduction && /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return true;
+  const forwardedHost = request.headers["x-forwarded-host"]?.split(",")[0]?.trim();
+  const forwardedProto = request.headers["x-forwarded-proto"]?.split(",")[0]?.trim();
+  const hostHeader = forwardedHost ?? request.headers.host;
+  const protocol = forwardedProto ?? (request.socket.encrypted ? "https" : "http");
+  return origin === `${protocol}://${hostHeader}`;
+};
+
+const createSessionToken = () => {
+  const expiresAt = String(Date.now() + sessionDurationMs);
+  const signature = createHmac("sha256", sessionSecret).update(expiresAt).digest("base64url");
+  return `${expiresAt}.${signature}`;
+};
+
+const hasValidSession = (request) => {
+  if (!authEnabled) return true;
+  const cookies = request.headers.cookie?.split(";") ?? [];
+  const token = cookies
+    .map((cookie) => cookie.trim())
+    .find((cookie) => cookie.startsWith(`${sessionCookieName}=`))
+    ?.slice(sessionCookieName.length + 1);
+  if (!token) return false;
+  const [expiresAt, signature, extra] = token.split(".");
+  if (!expiresAt || !signature || extra || !/^\d+$/.test(expiresAt) || Number(expiresAt) <= Date.now()) {
+    return false;
+  }
+  const expected = createHmac("sha256", sessionSecret).update(expiresAt).digest();
+  let actual;
+  try {
+    actual = Buffer.from(signature, "base64url");
+  } catch {
+    return false;
+  }
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+};
 
 await sql`
   ALTER TABLE tasks
@@ -174,7 +242,7 @@ const taskColumns = `
 `;
 
 // Вспомогательная функция отправки JSON с настройкой CORS
-const sendJson = (response, statusCode, body) => {
+const sendJson = (response, statusCode, body, additionalHeaders = {}) => {
   response.writeHead(statusCode, {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
@@ -182,6 +250,9 @@ const sendJson = (response, statusCode, body) => {
     "Access-Control-Allow-Methods": "GET, POST, PATCH, PUT, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, x-total-count",
     "Access-Control-Expose-Headers": "x-total-count",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "same-origin",
+    ...additionalHeaders,
   });
   response.end(JSON.stringify(body));
 };
@@ -195,6 +266,90 @@ const readJsonBody = async (request) => {
     }
   }
   return JSON.parse(body || "{}");
+};
+
+const distDirectory = resolve("dist");
+const contentTypes = {
+  ".css": "text/css; charset=utf-8",
+  ".html": "text/html; charset=utf-8",
+  ".ico": "image/x-icon",
+  ".jpeg": "image/jpeg",
+  ".jpg": "image/jpeg",
+  ".js": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+  ".webp": "image/webp",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+};
+
+const serveStaticFile = async (request, response, pathname) => {
+  let decodedPath;
+  try {
+    decodedPath = decodeURIComponent(pathname);
+  } catch {
+    return false;
+  }
+
+  const requestedPath = resolve(distDirectory, `.${decodedPath}`);
+  if (requestedPath !== distDirectory && !requestedPath.startsWith(`${distDirectory}${sep}`)) {
+    return false;
+  }
+
+  let filePath = requestedPath;
+  let fileInfo;
+  try {
+    fileInfo = await statAsync(filePath);
+  } catch (error) {
+    if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  if (fileInfo?.isDirectory()) {
+    filePath = join(filePath, "index.html");
+    try {
+      fileInfo = await statAsync(filePath);
+    } catch (error) {
+      if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
+
+  if (!fileInfo?.isFile()) {
+    if (extname(decodedPath)) return false;
+    filePath = join(distDirectory, "index.html");
+    try {
+      fileInfo = await statAsync(filePath);
+    } catch (error) {
+      if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
+
+  if (!fileInfo?.isFile()) return false;
+  const extension = extname(filePath).toLowerCase();
+  response.writeHead(200, {
+    "Content-Type": contentTypes[extension] ?? "application/octet-stream",
+    "Content-Length": fileInfo.size,
+    "Cache-Control": extension === ".html" ? "no-cache" : "public, max-age=31536000, immutable",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "same-origin",
+  });
+  if (request.method === "HEAD") {
+    response.end();
+    return true;
+  }
+  createReadStream(filePath).on("error", (error) => {
+    console.error("Could not read static app file:", error);
+    if (!response.headersSent) response.writeHead(500);
+    response.end();
+  }).pipe(response);
+  return true;
 };
 
 const sensitiveTaskPattern =
@@ -220,8 +375,85 @@ const server = createServer(async (request, response) => {
 
   const url = new URL(request.url ?? "/", `http://127.0.0.1:${port}`);
 
+  if (request.method === "GET" && url.pathname === "/api/auth/session") {
+    sendJson(response, 200, {
+      required: authEnabled,
+      authenticated: !authEnabled || hasValidSession(request),
+    });
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/auth/login") {
+    if (!isAllowedSettingsOrigin(request)) {
+      sendJson(response, 403, { message: "Недопустимый источник запроса." });
+      return;
+    }
+    if (!authEnabled) {
+      sendJson(response, 400, { message: "Пароль администратора не настроен." });
+      return;
+    }
+
+    let values;
+    try {
+      values = await readJsonBody(request);
+    } catch (error) {
+      sendJson(response, 400, {
+        message: error instanceof SyntaxError ? "Некорректный формат запроса." : "Некорректный запрос.",
+      });
+      return;
+    }
+
+    const submittedPassword = typeof values.password === "string" ? values.password : "";
+    const expectedPassword = createHash("sha256").update(adminPassword).digest();
+    const providedPassword = createHash("sha256").update(submittedPassword).digest();
+    if (!submittedPassword || !timingSafeEqual(expectedPassword, providedPassword)) {
+      sendJson(response, 401, { message: "Неверный пароль." });
+      return;
+    }
+
+    const secure = isProduction ? "; Secure" : "";
+    sendJson(
+      response,
+      200,
+      { authenticated: true },
+      {
+        "Set-Cookie": `${sessionCookieName}=${createSessionToken()}; HttpOnly${secure}; SameSite=Lax; Path=/; Max-Age=${sessionDurationMs / 1000}`,
+      }
+    );
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/auth/logout") {
+    if (!isAllowedSettingsOrigin(request)) {
+      sendJson(response, 403, { message: "Недопустимый источник запроса." });
+      return;
+    }
+    sendJson(response, 200, { authenticated: false }, {
+      "Set-Cookie": `${sessionCookieName}=; HttpOnly${isProduction ? "; Secure" : ""}; SameSite=Lax; Path=/; Max-Age=0`,
+    });
+    return;
+  }
+
+  const isPublicRoute =
+    request.method === "GET" && url.pathname === "/api/health";
+  const isPublicStaticRequest =
+    ["GET", "HEAD"].includes(request.method ?? "") && !url.pathname.startsWith("/api/");
+  if (!isPublicRoute && !isPublicStaticRequest && !hasValidSession(request)) {
+    sendJson(response, 401, { message: "Требуется войти в админ-панель.", authenticated: false });
+    return;
+  }
+  if (
+    !isPublicRoute &&
+    !isPublicStaticRequest &&
+    !["GET", "HEAD", "OPTIONS"].includes(request.method ?? "GET") &&
+    !isAllowedSettingsOrigin(request)
+  ) {
+    sendJson(response, 403, { message: "Недопустимый источник запроса." });
+    return;
+  }
+
   if (request.method === "POST" && url.pathname === "/api/ai/task-assist") {
-    if (!isAllowedSettingsOrigin(request.headers.origin)) {
+    if (!isAllowedSettingsOrigin(request)) {
       sendJson(response, 403, { message: "AI task assistance is available only from the local admin panel." });
       return;
     }
@@ -351,7 +583,7 @@ const server = createServer(async (request, response) => {
     /^\/api\/tasks\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/copilot$/i
   );
   if (request.method === "POST" && copilotIssueMatch) {
-    if (!isAllowedSettingsOrigin(request.headers.origin)) {
+    if (!isAllowedSettingsOrigin(request)) {
       sendJson(response, 403, { message: "GitHub task handoff is available only from the local admin panel." });
       return;
     }
@@ -474,7 +706,7 @@ const server = createServer(async (request, response) => {
   }
 
   if (url.pathname.startsWith("/api/settings/integrations")) {
-    if (!isAllowedSettingsOrigin(request.headers.origin)) {
+    if (!isAllowedSettingsOrigin(request)) {
       sendJson(response, 403, { message: "Integration settings are available only from the local admin panel." });
       return;
     }
@@ -1114,11 +1346,16 @@ const server = createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === "GET" || request.method === "HEAD") {
+    if (!url.pathname.startsWith("/api/") && await serveStaticFile(request, response, url.pathname)) {
+      return;
+    }
+  }
   sendJson(response, 404, { message: "Not found." });
 });
 
-server.listen(port, "127.0.0.1", () => {
-  console.log(`🚀 Tasks API listening on http://127.0.0.1:${port}`);
+server.listen(port, host, () => {
+  console.log(`🚀 J.A.R.V.I.S admin server listening on ${host}:${port}`);
 });
 
 server.on("error", (error) => {

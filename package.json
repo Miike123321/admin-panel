@@ -44,7 +44,7 @@
     "dev": "node scripts/dev.mjs",
     "api": "node server.mjs",
     "build": "tsc && refine build",
-    "start": "refine start",
+    "start": "node server.mjs",
     "refine": "refine",
     "db:generate": "drizzle-kit generate",
     "db:seed": "npx tsx src/db/seed.ts",
