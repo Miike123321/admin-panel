@@ -15,7 +15,7 @@ interface IntegrationSettings {
 type IntegrationName = "gemini" | "superset" | "github";
 
 const emptySettings: IntegrationSettings = {
-  gemini: { configured: false, model: "gemini-2.5-flash" },
+  gemini: { configured: false, model: "gemini-3.1-flash-lite" },
   superset: { configured: false, endpoint: "", hasAccessToken: false },
   github: {
     configured: false,
@@ -147,7 +147,11 @@ export const SettingsPage: React.FC = () => {
       const response = await fetch(`${apiUrl}/${integration}/test`, { method: "POST" });
       const result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(result.message ?? "Проверка соединения не прошла.");
-      setMessage(`Подключение ${integrationLabel(integration)} работает.`);
+      setMessage({
+        gemini: "API key и модель Gemini доступны. Эта проверка не расходует токены и не проверяет квоту генерации.",
+        superset: "Подключение к Superset MCP работает.",
+        github: "Токен видит репозиторий. Право создавать Issues эта проверка не подтверждает.",
+      }[integration]);
     } catch (testError) {
       setError(getErrorMessage(testError));
     } finally {
@@ -194,7 +198,7 @@ export const SettingsPage: React.FC = () => {
             <div className="integration-icon gemini-icon">✦</div>
             <div>
               <h2>Google Gemini</h2>
-              <p>Модель для подготовки результата AI-задачи.</p>
+              <p>Помощник для подготовки описаний задач с контекстом доски.</p>
             </div>
             <span className={`integration-status${settings.gemini.configured ? " connected" : ""}`}>
               {settings.gemini.configured ? "Ключ сохранён" : "Не подключено"}
@@ -207,7 +211,7 @@ export const SettingsPage: React.FC = () => {
                 className="task-input"
                 value={geminiModel}
                 onChange={(event) => setGeminiModel(event.target.value)}
-                placeholder="gemini-2.5-flash"
+                placeholder="gemini-3.1-flash-lite"
                 required
               />
             </label>
@@ -223,6 +227,12 @@ export const SettingsPage: React.FC = () => {
               />
             </label>
           </div>
+          <p className="integration-hint">
+            Используется только при нажатии «Помочь с описанием»: Gemini получает черновик
+            и до 10 последних несекретных задач. Для gemini-3.1-flash-lite доступен
+            бесплатный API-тариф с лимитами; подписка Google AI эти лимиты не увеличивает.
+            Проверьте проект, квоту и условия обработки данных в AI Studio.
+          </p>
           {settings.gemini.configured && (
             <label className="settings-clear-secret">
               <input
@@ -235,7 +245,7 @@ export const SettingsPage: React.FC = () => {
           )}
           <div className="integration-actions">
             <button type="button" className="integration-test-button" disabled={testing !== null || isSaving} onClick={() => void testConnection("gemini")}>
-              {testing === "gemini" ? "Сохраняем и проверяем..." : "Проверить подключение"}
+              {testing === "gemini" ? "Сохраняем и проверяем..." : "Проверить API key и модель"}
             </button>
           </div>
         </section>
@@ -300,7 +310,7 @@ export const SettingsPage: React.FC = () => {
             <div className="integration-icon github-icon">⑂</div>
             <div>
               <h2>GitHub</h2>
-              <p>Репозиторий для PR после проверки результата задачи.</p>
+              <p>Создание issue для передачи задач GitHub Copilot.</p>
             </div>
             <span className={`integration-status${settings.github.configured ? " connected" : ""}`}>
               {settings.github.configured ? "Данные сохранены" : "Не подключено"}
@@ -333,7 +343,7 @@ export const SettingsPage: React.FC = () => {
                 autoComplete="new-password"
                 value={githubAccessToken}
                 onChange={(event) => setGithubAccessToken(event.target.value)}
-                placeholder={settings.github.hasAccessToken ? "Токен сохранён — пустое поле его не изменит" : "Вставьте token с правами на PR"}
+                placeholder={settings.github.hasAccessToken ? "Токен сохранён — пустое поле его не изменит" : "Token с правом Issues: read/write"}
               />
             </label>
           </div>
@@ -349,7 +359,7 @@ export const SettingsPage: React.FC = () => {
           )}
           <div className="integration-actions">
             <button type="button" className="integration-test-button" disabled={testing !== null || isSaving} onClick={() => void testConnection("github")}>
-              {testing === "github" ? "Сохраняем и проверяем..." : "Проверить подключение"}
+              {testing === "github" ? "Сохраняем и проверяем..." : "Проверить доступ к репозиторию"}
             </button>
           </div>
         </section>
@@ -362,29 +372,19 @@ export const SettingsPage: React.FC = () => {
       </form>
 
       <section className="settings-roadmap">
-        <h2>Основа AI-процесса</h2>
+        <h2>Как задачи выполняются через Copilot</h2>
         <p>
-          AI-исполнителя можно создать на странице «Ответственные»: назначенные ему
-          задачи появятся в отдельном беклоге. Для карточек уже предусмотрены поля
-          результата и кода, а колонка «Тест» оформляется как зона ревью.
+          Назначьте задаче ИИ-исполнителя и нажмите «Copilot» на карточке. Панель
+          создаст issue в выбранном GitHub-репозитории; откройте его и назначьте
+          GitHub Copilot, чтобы начать выполнение. Gemini код не меняет.
         </p>
         <p>
-          Сейчас экран сохраняет и проверяет подключения, но фоновое выполнение
-          задач и создание Pull Request ещё не включены. Зарплатные задачи исключены
-          из передачи Gemini; Superset настраивается только для чтения.
+          Copilot работает по возможностям вашего GitHub-плана. Создание issue само
+          по себе не запускает агента; изменения приходят в PR для ручного ревью.
+          Автоматические merge и deploy не выполняются. Задачи с чувствительными
+          персональными или платёжными данными нельзя отправлять во внешние сервисы.
         </p>
       </section>
     </div>
   );
 };
-
-function integrationLabel(integration: IntegrationName) {
-  switch (integration) {
-    case "gemini":
-      return "Gemini";
-    case "superset":
-      return "Superset MCP";
-    case "github":
-      return "GitHub";
-  }
-}

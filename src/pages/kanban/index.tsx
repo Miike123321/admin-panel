@@ -1,12 +1,14 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   type BaseKey,
   type BaseRecord,
   useCreate,
   useDelete,
+  useInvalidate,
   useList,
   useUpdate,
 } from "@refinedev/core";
+import { API_URL } from "../../providers/constants";
 
 const COLUMNS = [
   { id: "todo", title: "ToDo" },
@@ -54,7 +56,8 @@ interface Task extends BaseRecord {
   isAiTask?: boolean;
   aiResult?: string | null;
   aiCode?: string | null;
-  aiStatus?: string;
+  githubIssueUrl?: string | null;
+  githubIssueNumber?: number | null;
 }
 
 interface Responsible extends BaseRecord {
@@ -66,6 +69,35 @@ interface Responsible extends BaseRecord {
 
 const getErrorMessage = (error: unknown) =>
   error instanceof Error ? error.message : "Неизвестная ошибка";
+
+interface AiFileReview {
+  path: string;
+  original: string | null;
+  content: string;
+}
+
+const getAiFiles = (code: string | null | undefined): AiFileReview[] => {
+  if (!code) return [];
+  try {
+    const parsed: unknown = JSON.parse(code);
+    if (!parsed || typeof parsed !== "object" || !("files" in parsed) || !Array.isArray(parsed.files)) {
+      return [];
+    }
+    return parsed.files.filter(
+      (file): file is AiFileReview =>
+        Boolean(file) &&
+        typeof file === "object" &&
+        "path" in file &&
+        typeof file.path === "string" &&
+        "content" in file &&
+        typeof file.content === "string" &&
+        "original" in file &&
+        (typeof file.original === "string" || file.original === null)
+    );
+  } catch {
+    return [];
+  }
+};
 
 interface BasketballThrow {
   taskId?: BaseKey;
@@ -112,6 +144,9 @@ export const KanbanPage: React.FC = () => {
   const [deleteError, setDeleteError] = useState("");
   const [draggedTask, setDraggedTask] = useState<DraggedTask | null>(null);
   const [dragOverColumn, setDragOverColumn] = useState<string | null>(null);
+  const [copilotTaskId, setCopilotTaskId] = useState<BaseKey | null>(null);
+  const [dispatchingTaskId, setDispatchingTaskId] = useState<BaseKey | null>(null);
+  const [isAssistingDescription, setIsAssistingDescription] = useState(false);
 
   const {
     result: { data: tasks },
@@ -120,6 +155,7 @@ export const KanbanPage: React.FC = () => {
     resource: "tasks",
     pagination: { mode: "off" },
   });
+  const invalidate = useInvalidate();
   const {
     result: { data: responsibles },
   } = useList<Responsible>({
@@ -130,12 +166,59 @@ export const KanbanPage: React.FC = () => {
   const { mutate: createTask, mutation: createMutation } = useCreate<Task>();
   const { mutate: deleteTask, mutation: deleteMutation } = useDelete<Task>();
 
+  useEffect(() => {
+    if (copilotTaskId === null) return;
+    const timeout = window.setTimeout(() => setCopilotTaskId(null), 2600);
+    return () => window.clearTimeout(timeout);
+  }, [copilotTaskId]);
+
   const handleStatusChange = (taskId: BaseKey, status: string) => {
     updateTask({
       resource: "tasks",
       id: taskId,
       values: { status },
     });
+  };
+
+  const handleCopilotDispatch = async (task: Task) => {
+    setDeleteError("");
+    setCopilotTaskId(task.id);
+    setDispatchingTaskId(task.id);
+    try {
+      const response = await fetch(`${API_URL}/tasks/${task.id}/copilot`, { method: "POST" });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.message ?? "Не удалось создать GitHub issue.");
+      await invalidate({ resource: "tasks", invalidates: ["list"] });
+    } catch (dispatchError) {
+      setCopilotTaskId(null);
+      setDeleteError(`Не удалось передать задачу в GitHub: ${getErrorMessage(dispatchError)}`);
+    } finally {
+      setDispatchingTaskId(null);
+    }
+  };
+
+  const handleDescriptionAssist = async () => {
+    setCreateError("");
+    setIsAssistingDescription(true);
+    try {
+      const response = await fetch(`${API_URL}/ai/task-assist`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          taskId: editingTask?.id,
+          title: newTitle,
+          description: newDescription,
+          subsystem: newSubsystem,
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.message ?? "Gemini не смог подготовить описание.");
+      setNewDescription(result.description);
+    } catch (assistError) {
+      setCreateError(`Не удалось подготовить описание: ${getErrorMessage(assistError)}`);
+    } finally {
+      setIsAssistingDescription(false);
+    }
   };
 
   const handleEditOpen = (task: Task) => {
@@ -451,7 +534,8 @@ export const KanbanPage: React.FC = () => {
             if (
               event.target === event.currentTarget &&
               !createMutation.isPending &&
-              !updateMutation.isPending
+              !updateMutation.isPending &&
+              !isAssistingDescription
             ) {
               setIsCreateOpen(false);
             }
@@ -469,7 +553,7 @@ export const KanbanPage: React.FC = () => {
               <button
                 type="button"
                 onClick={closeTaskForm}
-                disabled={createMutation.isPending || updateMutation.isPending}
+                disabled={createMutation.isPending || updateMutation.isPending || isAssistingDescription}
                 aria-label="Закрыть форму"
                 className="modal-close"
               >
@@ -490,16 +574,30 @@ export const KanbanPage: React.FC = () => {
               />
             </label>
 
-            <label className="task-field">
-              <span>Описание (ТЗ)</span>
+            <div className="task-field">
+              <div className="task-description-assist-header">
+                <label htmlFor="task-description">Описание (ТЗ)</label>
+                <button
+                  type="button"
+                  className="gemini-assist-button"
+                  disabled={isAssistingDescription || (!newTitle.trim() && !newDescription.trim())}
+                  onClick={() => void handleDescriptionAssist()}
+                >
+                  {isAssistingDescription ? "Gemini готовит..." : "Помочь с описанием"}
+                </button>
+              </div>
               <textarea
+                id="task-description"
                 rows={3}
                 value={newDescription}
                 onChange={(event) => setNewDescription(event.target.value)}
                 placeholder="Подробности ТЗ или спецификация..."
                 className="task-input"
               />
-            </label>
+              <small className="gemini-assist-hint">
+                Gemini учтёт до 10 последних задач этой подсистемы без чувствительных данных. Проверьте текст перед сохранением.
+              </small>
+            </div>
 
             <label className="task-field">
               <span>Ссылка на картинку / мокап (URL)</span>
@@ -582,17 +680,19 @@ export const KanbanPage: React.FC = () => {
               <button
                 type="button"
                 onClick={closeTaskForm}
-                disabled={createMutation.isPending || updateMutation.isPending}
+                disabled={createMutation.isPending || updateMutation.isPending || isAssistingDescription}
                 className="modal-cancel"
               >
                 Отмена
               </button>
               <button
                 type="submit"
-                disabled={createMutation.isPending || updateMutation.isPending}
+                disabled={createMutation.isPending || updateMutation.isPending || isAssistingDescription}
                 className="modal-submit"
               >
-                {createMutation.isPending || updateMutation.isPending
+                {isAssistingDescription
+                  ? "Gemini готовит описание..."
+                  : createMutation.isPending || updateMutation.isPending
                   ? "Сохраняем..."
                   : editingTask
                     ? "Сохранить"
@@ -613,7 +713,7 @@ export const KanbanPage: React.FC = () => {
           <section className="task-modal ai-review-modal" aria-labelledby="ai-review-title">
             <div className="ai-review-heading">
               <div>
-                <span className="ai-review-kicker">AI · РЕЗУЛЬТАТ НЕ ОПУБЛИКОВАН</span>
+                <span className="ai-review-kicker">АРХИВНЫЙ РЕЗУЛЬТАТ GEMINI</span>
                 <h2 id="ai-review-title">{reviewingTask.title}</h2>
               </div>
               <button
@@ -631,9 +731,8 @@ export const KanbanPage: React.FC = () => {
                 <p>{reviewingTask.aiResult}</p>
               ) : (
                 <p className="ai-review-empty">
-                  Результат появится здесь после настройки AI-исполнителя и подключения
-                  Superset MCP. Сейчас задача находится в беклоге; внешний запуск ещё
-                  не включён.
+                  Новые кодовые задачи выполняются через GitHub Copilot. Откройте issue на карточке,
+                  назначьте Copilot в GitHub, а результат проверяйте в Pull Request.
                 </p>
               )}
             </div>
@@ -646,19 +745,35 @@ export const KanbanPage: React.FC = () => {
               >
                 {showAiCode ? "Скрыть код" : "Просмотреть код"}
               </button>
-              <button
-                type="button"
-                className="modal-submit ai-publish-button"
-                disabled
-                title="Настройте репозиторий GitHub и подключите исполнение AI-задач."
-              >
-                Создать PR в GitHub
-              </button>
+              {reviewingTask.githubIssueUrl && (
+                <a
+                  className="ai-redo-button"
+                  href={reviewingTask.githubIssueUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Открыть GitHub issue
+                </a>
+              )}
             </div>
             {showAiCode && (
-              <pre className="ai-review-code">
-                {reviewingTask.aiCode || "Код для этой задачи ещё не подготовлен."}
-              </pre>
+              <div className="ai-review-code-files">
+                {getAiFiles(reviewingTask.aiCode).map((file) => (
+                  <details key={file.path} open>
+                    <summary>{file.path}</summary>
+                    {file.original !== null && (
+                      <details>
+                        <summary>Исходная версия</summary>
+                        <pre className="ai-review-code">{file.original}</pre>
+                      </details>
+                    )}
+                    <pre className="ai-review-code">{file.content}</pre>
+                  </details>
+                ))}
+                {getAiFiles(reviewingTask.aiCode).length === 0 && (
+                  <pre className="ai-review-code">Код для этой задачи ещё не подготовлен.</pre>
+                )}
+              </div>
             )}
           </section>
         </div>
@@ -734,9 +849,35 @@ export const KanbanPage: React.FC = () => {
                     </div>
 
                     {task.isAiTask && (
-                      <span className="ai-task-badge">
-                        {task.status === "test" ? "ИИ · ОЖИДАЕТ РЕВЬЮ" : "ИИ · ЗАДАЧА"}
-                      </span>
+                      <>
+                        <span className="ai-task-badge">
+                          {task.githubIssueNumber
+                            ? `COPILOT · ISSUE #${task.githubIssueNumber}`
+                            : "COPILOT · ЗАДАЧА"}
+                        </span>
+                      </>
+                    )}
+                    {copilotTaskId === task.id && (
+                      <div className="ai-pit-stop" role="status" aria-live="polite">
+                        <svg viewBox="0 0 210 72" aria-hidden="true">
+                          <g className="ai-pit-robot">
+                            <path className="ai-pit-robot-line" d="M47 12V7m0 0h8" />
+                            <circle className="ai-pit-robot-dot" cx="57" cy="7" r="2" />
+                            <rect className="ai-pit-robot-line" x="33" y="13" width="29" height="20" rx="6" />
+                            <circle className="ai-pit-robot-eye" cx="42" cy="22" r="2" />
+                            <circle className="ai-pit-robot-eye" cx="53" cy="22" r="2" />
+                            <path className="ai-pit-robot-line" d="M41 28h13m-11 5v15h15V33m-15 5-12 8 4 5m23-13 12 7" />
+                            <path className="ai-pit-robot-line" d="m43 48-5 9m15-9 5 9" />
+                          </g>
+                          <path className="ai-pit-car-body" d="m84 47 8-11q3-5 10-5h37q7 0 11 5l9 11h13q5 0 5 5v5H82v-6q0-4 2-4Z" />
+                          <path className="ai-pit-car-window" d="m97 36-6 9h23v-9Zm21 0v9h34l-7-8q-1-1-4-1Z" />
+                          <circle className="ai-pit-car-wheel" cx="106" cy="56" r="7" />
+                          <circle className="ai-pit-car-wheel" cx="160" cy="56" r="7" />
+                          <circle className="ai-pit-wheel-old" cx="106" cy="56" r="7" />
+                          <circle className="ai-pit-wheel-new" cx="106" cy="20" r="7" />
+                        </svg>
+                        <span>Пит-стоп: готовим задачу для Copilot…</span>
+                      </div>
                     )}
 
                     {task.subsystem && (
@@ -781,13 +922,37 @@ export const KanbanPage: React.FC = () => {
                       </div>
                       <div className="task-card-actions">
                         {task.isAiTask && (
+                          task.githubIssueUrl ? (
+                            <a
+                              className="ai-redo-button"
+                              href={task.githubIssueUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              aria-label={`Открыть GitHub issue задачи «${task.title}»`}
+                            >
+                              Issue #{task.githubIssueNumber}
+                            </a>
+                          ) : (
+                            <button
+                              type="button"
+                              className="ai-redo-button"
+                              aria-label={`Создать GitHub issue для задачи «${task.title}»`}
+                              title="Создать GitHub issue для передачи Copilot"
+                              disabled={dispatchingTaskId === task.id}
+                              onClick={() => void handleCopilotDispatch(task)}
+                            >
+                              {dispatchingTaskId === task.id ? "Создаём..." : "Copilot"}
+                            </button>
+                          )
+                        )}
+                        {task.isAiTask && (task.aiResult || task.aiCode) && (
                           <button
                             type="button"
                             className="ai-review-button"
-                            aria-label={`Открыть результат AI-задачи «${task.title}»`}
+                            aria-label={`Открыть архивный результат Gemini задачи «${task.title}»`}
                             onClick={() => openAiReview(task)}
                           >
-                            Результат
+                            Архив
                           </button>
                         )}
                         <button

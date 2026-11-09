@@ -1243,6 +1243,35 @@ textarea.task-input {
   letter-spacing: 0.06em;
 }
 
+.ai-task-state {
+  display: inline-flex;
+  width: fit-content;
+  margin: 0 0 9px 5px;
+  padding: 4px 7px;
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: 6px;
+  background: rgb(255 255 255 / 4%);
+  color: #b6c1ba;
+  font-size: 8px;
+  font-weight: 650;
+}
+
+.ai-task-state-running {
+  border-color: rgb(201 143 255 / 28%);
+  color: #d7adff;
+  animation: ai-review-pulse 2s ease-in-out infinite;
+}
+
+.ai-task-state-review {
+  border-color: rgb(103 255 139 / 24%);
+  color: #9affae;
+}
+
+.ai-task-state-failed {
+  border-color: rgb(255 128 137 / 24%);
+  color: #ff9aa4;
+}
+
 .ai-review-button {
   min-height: 27px;
   padding: 0 8px;
@@ -1256,6 +1285,154 @@ textarea.task-input {
 
 .ai-review-button:hover {
   background: rgb(152 81 219 / 22%);
+}
+
+.ai-redo-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 27px;
+  padding: 0 8px;
+  border: 1px solid rgb(117 255 148 / 25%);
+  border-radius: 7px;
+  background: rgb(81 240 113 / 8%);
+  color: #a4ffb5;
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
+}
+
+.ai-redo-button:hover:not(:disabled) {
+  background: rgb(81 240 113 / 17%);
+  box-shadow: 0 0 12px rgb(81 240 113 / 15%);
+}
+
+.ai-redo-button:disabled {
+  cursor: wait;
+  opacity: 0.5;
+}
+
+.task-description-assist-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.gemini-assist-button {
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  border: 1px solid rgb(117 255 148 / 22%);
+  border-radius: 7px;
+  background: rgb(81 240 113 / 7%);
+  color: #a4ffb5;
+  font-size: 9px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.gemini-assist-button:hover:not(:disabled) {
+  background: rgb(81 240 113 / 14%);
+}
+
+.gemini-assist-button:disabled {
+  cursor: wait;
+  opacity: 0.5;
+}
+
+.gemini-assist-hint {
+  display: block;
+  margin-top: 5px;
+  color: #829083;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.ai-pit-stop {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  margin: 0 0 10px;
+  padding: 6px 8px;
+  overflow: hidden;
+  border: 1px solid rgb(117 255 148 / 18%);
+  border-radius: 9px;
+  background:
+    radial-gradient(ellipse at 50% 100%, rgb(81 240 113 / 10%), transparent 68%),
+    rgb(8 15 13 / 75%);
+  color: #a4ffb5;
+  font-size: 8px;
+  letter-spacing: 0.03em;
+}
+
+.ai-pit-stop svg {
+  width: min(100%, 210px);
+  height: 58px;
+  overflow: visible;
+}
+
+.ai-pit-robot {
+  transform-box: view-box;
+  transform-origin: 50px 42px;
+  animation: ai-pit-robot-work 480ms ease-in-out infinite alternate;
+}
+
+.ai-pit-robot-line {
+  fill: #14251c;
+  stroke: #8dff9f;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
+.ai-pit-robot-dot,
+.ai-pit-robot-eye {
+  fill: #a4ffb5;
+}
+
+.ai-pit-robot-dot {
+  filter: drop-shadow(0 0 3px #8dff9f);
+}
+
+.ai-pit-car-body {
+  fill: #153322;
+  stroke: #75ff94;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
+.ai-pit-car-window {
+  fill: #3c8760;
+  stroke: #a4ffb5;
+  stroke-linejoin: round;
+  stroke-width: 1;
+}
+
+.ai-pit-car-wheel,
+.ai-pit-wheel-old,
+.ai-pit-wheel-new {
+  fill: #0a0d11;
+  stroke: #c3d1c5;
+  stroke-width: 3;
+}
+
+.ai-pit-car-wheel {
+  stroke: #71847a;
+}
+
+.ai-pit-wheel-old {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: ai-pit-wheel-remove 1.8s ease-in-out both;
+}
+
+.ai-pit-wheel-new {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: ai-pit-wheel-fit 1.8s ease-in-out both;
 }
 
 .ai-result-preview {
@@ -1352,12 +1529,74 @@ textarea.task-input {
   overflow-wrap: anywhere;
 }
 
+.ai-review-code-files {
+  display: grid;
+  max-height: 430px;
+  gap: 8px;
+  overflow: auto;
+}
+
+.ai-review-code-files details {
+  min-width: 0;
+  color: #d8c6e8;
+  font-size: 10px;
+}
+
+.ai-review-code-files > details {
+  padding: 10px;
+  border: 1px solid rgb(201 143 255 / 20%);
+  border-radius: 10px;
+  background: rgb(9 7 14 / 40%);
+}
+
+.ai-review-code-files summary {
+  padding: 3px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.ai-review-code-files .ai-review-code {
+  max-height: 300px;
+  margin-top: 8px;
+}
+
 @keyframes ai-review-pulse {
   0%, 100% {
     box-shadow: 0 0 18px rgb(172 95 255 / 13%), 0 12px 28px rgb(0 0 0 / 27%), inset 0 1px rgb(255 230 255 / 18%);
   }
   50% {
     box-shadow: 0 0 30px rgb(172 95 255 / 25%), 0 12px 28px rgb(0 0 0 / 27%), inset 0 1px rgb(255 230 255 / 18%);
+  }
+}
+
+@keyframes ai-pit-robot-work {
+  from {
+    transform: rotate(-4deg) translateY(1px);
+  }
+  to {
+    transform: rotate(4deg) translateY(-1px);
+  }
+}
+
+@keyframes ai-pit-wheel-remove {
+  0%, 28% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  56%, 100% {
+    opacity: 0;
+    transform: translate(10px, -9px) scale(0.45);
+  }
+}
+
+@keyframes ai-pit-wheel-fit {
+  0%, 45% {
+    opacity: 0;
+    transform: translateY(-15px) scale(0.35);
+  }
+  72%, 100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
   }
 }
 
@@ -2516,7 +2755,10 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .basketball,
   .soccer-ball,
-  .formula-car {
+  .formula-car,
+  .ai-pit-robot,
+  .ai-pit-wheel-old,
+  .ai-pit-wheel-new {
     animation-duration: 1ms;
   }
 

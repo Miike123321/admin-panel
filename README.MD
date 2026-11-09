@@ -34,10 +34,22 @@ it, saved integration credentials cannot be decrypted. The settings API accepts
 requests only from localhost origins. Superset settings currently support a
 remote HTTPS MCP endpoint and are intended for read-only access.
 
-The AI-assignee role, AI backlog, result/code review fields, and purple review
-card styling are workflow foundations. Gemini task execution and GitHub PR
-creation are not enabled yet. Tasks involving payroll or personal data must not
-be sent to Gemini.
+Gemini is only used when **Help with description** is clicked in the task form.
+The API sends the draft and up to 10 recent, non-sensitive tasks from the same
+subsystem to the configured Gemini model; it does not send source files or
+modify tasks. Sensitive payroll, personal, or payment-related task text is
+blocked. The default helper model is `gemini-3.1-flash-lite`, which currently
+has a free Gemini Developer API tier with model-specific limits. Google AI
+subscriptions do not increase that API quota; API usage and data-handling terms
+are separate. Check the AI Studio project and billing settings before use.
+
+An AI-assigned task can be sent to GitHub with the **Copilot** action on its
+card. The local API creates one GitHub issue per task and stores its URL. Open
+the issue and assign GitHub Copilot in GitHub to start coding; issue creation
+alone does not start the agent. Copilot works under the configured GitHub plan
+and repository policies. It proposes changes in a PR for manual review; J.A.R.V.I.S.
+does not automatically merge or deploy. The configured GitHub token needs
+permission to create issues in the selected repository.
 
 ### Running the development server.
 

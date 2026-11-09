@@ -22,6 +22,11 @@ const sql = neon(databaseUrl);
 const taskStatuses = new Set(["todo", "in_progress", "test", "done", "waiting"]);
 const taskSubsystems = new Set(["db", "backend", "frontend", "admin", "infra"]);
 const taskPriorities = new Set(["p0", "p1", "p2", "p3"]);
+const DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite";
+const geminiModelFor = (settings) =>
+  !settings.gemini?.model || settings.gemini.model === "gemini-2.5-flash"
+    ? DEFAULT_GEMINI_MODEL
+    : settings.gemini.model;
 const settingsKeyPath =
   process.env.JARVIS_SETTINGS_KEY_FILE ??
   join(homedir(), ".jarvis-admin", "settings.key");
@@ -104,7 +109,9 @@ await sql`
   ALTER TABLE tasks
     ADD COLUMN IF NOT EXISTS ai_result text,
     ADD COLUMN IF NOT EXISTS ai_code text,
-    ADD COLUMN IF NOT EXISTS ai_status varchar(20) NOT NULL DEFAULT 'none'
+    ADD COLUMN IF NOT EXISTS ai_status varchar(20) NOT NULL DEFAULT 'none',
+    ADD COLUMN IF NOT EXISTS github_issue_url text,
+    ADD COLUMN IF NOT EXISTS github_issue_number integer
 `;
 
 const taskColumnRows = await sql`
@@ -153,6 +160,8 @@ const taskColumns = `
   ai_result AS "aiResult",
   ai_code AS "aiCode",
   ai_status AS "aiStatus",
+  github_issue_url AS "githubIssueUrl",
+  github_issue_number AS "githubIssueNumber",
   ${hasAssigneeId ? `EXISTS (
     SELECT 1
     FROM users responsible
@@ -188,6 +197,14 @@ const readJsonBody = async (request) => {
   return JSON.parse(body || "{}");
 };
 
+const sensitiveTaskPattern =
+  /зарплат|заработн|расч[её]т.{0,30}выплат|payroll|salary|wage|снилс|паспорт|персональн.{0,30}данн|личн.{0,30}данн|номер.{0,20}карт|банковск.{0,20}карт/iu;
+const containsSensitiveTaskData = (value) =>
+  sensitiveTaskPattern.test(value) ||
+  /[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/u.test(value) ||
+  /(?:\+?\d[\s().-]*){10,15}/u.test(value);
+const pendingGitHubIssues = new Set();
+
 const server = createServer(async (request, response) => {
   // 1. Перехват CORS preflight (OPTIONS) запросов от браузера
   if (request.method === "OPTIONS") {
@@ -202,6 +219,259 @@ const server = createServer(async (request, response) => {
   }
 
   const url = new URL(request.url ?? "/", `http://127.0.0.1:${port}`);
+
+  if (request.method === "POST" && url.pathname === "/api/ai/task-assist") {
+    if (!isAllowedSettingsOrigin(request.headers.origin)) {
+      sendJson(response, 403, { message: "AI task assistance is available only from the local admin panel." });
+      return;
+    }
+
+    let values;
+    try {
+      values = await readJsonBody(request);
+    } catch (error) {
+      sendJson(response, 400, {
+        message:
+          error instanceof SyntaxError
+            ? "Request body must be valid JSON."
+            : error instanceof Error
+              ? error.message
+              : "Invalid request body.",
+      });
+      return;
+    }
+
+    const title = typeof values.title === "string" ? values.title.trim() : "";
+    const description = typeof values.description === "string" ? values.description.trim() : "";
+    const subsystem = values.subsystem;
+    const taskId = values.taskId ?? null;
+    if (
+      (!title && !description) ||
+      title.length > 255 ||
+      description.length > 8_000 ||
+      !taskSubsystems.has(subsystem) ||
+      (taskId !== null &&
+        (typeof taskId !== "string" ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(taskId)))
+    ) {
+      sendJson(response, 400, { message: "Укажите название или черновик описания и корректную подсистему." });
+      return;
+    }
+    if (containsSensitiveTaskData(`${title}\n${description}`)) {
+      sendJson(response, 400, { message: "Задачи с чувствительными персональными или платёжными данными нельзя отправлять Gemini." });
+      return;
+    }
+
+    try {
+      const settings = await readIntegrationSettings();
+      if (!settings.gemini?.apiKey) {
+        sendJson(response, 400, { message: "Сначала сохраните Gemini API key в Настройки → Google Gemini." });
+        return;
+      }
+
+      const relatedTasks = await sql`
+        SELECT id, title, description, status::text AS status, priority
+        FROM tasks
+        WHERE subsystem::text = ${subsystem}
+        ORDER BY updated_at DESC
+        LIMIT 50
+      `;
+      const context = relatedTasks
+        .filter((task) =>
+          task.id !== taskId &&
+          !containsSensitiveTaskData(`${task.title}\n${task.description ?? ""}`)
+        )
+        .slice(0, 10)
+        .map(({ title: taskTitle, description: taskDescription, status, priority }) => ({
+          title: taskTitle,
+          description: taskDescription?.slice(0, 400) ?? "",
+          status,
+          priority,
+        }));
+
+      const prompt = [
+        "Помоги составить качественное описание задачи для разработки в J.A.R.V.I.S.",
+        "Верни только готовый текст описания на русском языке: цель, требования и проверяемые критерии приёмки.",
+        "Не выдумывай факты и решения. Если деталей не хватает, перечисли короткие уточняющие вопросы в конце.",
+        "Учитывай контекст недавних задач только для согласованности терминов; не копируй их требования автоматически.",
+        `Подсистема: ${subsystem}`,
+        `Название: ${title || "(не указано)"}`,
+        `Черновик описания:\n${description || "(пусто)"}`,
+        `Другие недавние задачи этой подсистемы (без чувствительных задач):\n${JSON.stringify(context)}`,
+      ].join("\n\n");
+
+      const result = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(geminiModelFor(settings))}:generateContent`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": settings.gemini.apiKey,
+          },
+          signal: AbortSignal.timeout(30_000),
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { temperature: 0.3, maxOutputTokens: 1400 },
+          }),
+        }
+      );
+      if (!result.ok) {
+        const status = result.status;
+        sendJson(response, [402, 403, 429].includes(status) ? status : 502, {
+          message:
+            status === 402
+              ? "Gemini API вернул HTTP 402: вероятно, исчерпаны предварительно оплаченные кредиты или проект требует настроить оплату. Проверка API key может проходить, но генерация блокируется. Проверьте проект и баланс в AI Studio; подписка Google AI не оплачивает Gemini API."
+              : status === 429
+                ? "Достигнут лимит Gemini API. Попробуйте позже или проверьте бесплатную квоту AI Studio."
+                : status === 403
+                  ? "Gemini API запретил генерацию для этого проекта или ключа. Проверьте доступ модели и настройки проекта в AI Studio."
+                  : `Gemini API не выполнил запрос (HTTP ${status}). Проверьте модель и API key в настройках.`,
+        });
+        return;
+      }
+
+      const generated = await result.json();
+      const suggestedDescription = generated.candidates?.[0]?.content?.parts
+        ?.map((part) => part.text ?? "")
+        .join("")
+        .trim();
+      if (!suggestedDescription) {
+        sendJson(response, 502, { message: "Gemini вернул пустое описание. Попробуйте уточнить название задачи." });
+        return;
+      }
+      sendJson(response, 200, { description: suggestedDescription });
+    } catch (error) {
+      console.error("Failed to assist with task description:", error);
+      sendJson(response, 502, { message: "Не удалось получить подсказку Gemini. Проверьте подключение и повторите попытку." });
+    }
+    return;
+  }
+
+  const copilotIssueMatch = url.pathname.match(
+    /^\/api\/tasks\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/copilot$/i
+  );
+  if (request.method === "POST" && copilotIssueMatch) {
+    if (!isAllowedSettingsOrigin(request.headers.origin)) {
+      sendJson(response, 403, { message: "GitHub task handoff is available only from the local admin panel." });
+      return;
+    }
+
+    const taskId = copilotIssueMatch[1];
+    if (pendingGitHubIssues.has(taskId)) {
+      sendJson(response, 409, { message: "GitHub issue is already being created for this task." });
+      return;
+    }
+    pendingGitHubIssues.add(taskId);
+    try {
+      const [task] = await sql`
+        SELECT
+          id, title, description, subsystem, priority,
+          github_issue_url AS "githubIssueUrl",
+          ${hasAssigneeId ? sql`EXISTS (
+            SELECT 1
+            FROM users responsible
+            WHERE responsible.id = tasks.assignee_id
+              AND (lower(responsible.role) = 'ai' OR lower(responsible.full_name) IN ('ии', 'ai', 'jarvis'))
+          )` : sql`false`} AS "isAiTask"
+        FROM tasks
+        WHERE id = ${taskId}
+      `;
+      if (!task) {
+        sendJson(response, 404, { message: "Task not found." });
+        return;
+      }
+      if (!task.isAiTask) {
+        sendJson(response, 400, { message: "Only tasks assigned to the AI executor can be sent to Copilot." });
+        return;
+      }
+      if (task.githubIssueUrl) {
+        sendJson(response, 200, { url: task.githubIssueUrl, alreadyCreated: true });
+        return;
+      }
+      if (containsSensitiveTaskData(`${task.title}\n${task.description ?? ""}`)) {
+        sendJson(response, 400, { message: "Задачу с чувствительными персональными или платёжными данными нельзя отправить в GitHub." });
+        return;
+      }
+
+      const settings = await readIntegrationSettings();
+      const github = settings.github;
+      if (
+        !github?.repository ||
+        !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(github.repository) ||
+        !github.accessToken
+      ) {
+        sendJson(response, 400, { message: "Сначала сохраните GitHub-репозиторий и token в Настройки → GitHub." });
+        return;
+      }
+
+      const body = [
+        "## Задача из J.A.R.V.I.S.",
+        `- Подсистема: **${task.subsystem}**`,
+        `- Приоритет: **${task.priority}**`,
+        `- Локальный ID: \`${task.id}\``,
+        "",
+        "## Описание",
+        task.description?.trim() || "_Описание не добавлено._",
+        "",
+        "## Критерии выполнения",
+        "- Изучить соответствующий код и существующие соглашения проекта.",
+        "- Реализовать задачу и добавить или обновить проверки, если это уместно.",
+        `- Проверить изменения относительно базовой ветки \`${github.baseBranch ?? "main"}\`.`,
+        "- Подготовить Pull Request для ручного ревью. Не выполнять merge или deploy.",
+        "",
+        "_Issue создан из J.A.R.V.I.S. Чтобы начать выполнение, назначьте GitHub Copilot на этот issue в интерфейсе GitHub._",
+      ].join("\n");
+      const githubResponse = await fetch(
+        `https://api.github.com/repos/${github.repository}/issues`,
+        {
+          method: "POST",
+          headers: {
+            Accept: "application/vnd.github+json",
+            Authorization: `Bearer ${github.accessToken}`,
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "JARVIS-admin-panel",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ title: task.title, body }),
+          signal: AbortSignal.timeout(20_000),
+        }
+      );
+      if (!githubResponse.ok) {
+        const status = githubResponse.status;
+        sendJson(response, status === 401 || status === 403 ? 403 : 502, {
+          message:
+            status === 401 || status === 403
+              ? "GitHub отказал в доступе. Проверьте token и права на создание Issues."
+              : `GitHub не создал issue (HTTP ${status}). Проверьте репозиторий и настройки.`,
+        });
+        return;
+      }
+      const issue = await githubResponse.json();
+      if (
+        !Number.isInteger(issue.number) ||
+        typeof issue.html_url !== "string" ||
+        !issue.html_url.startsWith("https://github.com/")
+      ) {
+        sendJson(response, 502, { message: "GitHub вернул некорректные данные issue." });
+        return;
+      }
+
+      await sql`
+        UPDATE tasks
+        SET github_issue_url = ${issue.html_url},
+            github_issue_number = ${issue.number},
+            updated_at = now()
+        WHERE id = ${taskId}
+      `;
+      sendJson(response, 201, { url: issue.html_url, number: issue.number });
+    } catch (error) {
+      console.error("Failed to hand task off to GitHub Copilot:", error);
+      sendJson(response, 502, { message: "Не удалось создать GitHub issue. Проверьте подключение и настройки." });
+    } finally {
+      pendingGitHubIssues.delete(taskId);
+    }
+    return;
+  }
 
   if (url.pathname.startsWith("/api/settings/integrations")) {
     if (!isAllowedSettingsOrigin(request.headers.origin)) {
@@ -218,7 +488,7 @@ const server = createServer(async (request, response) => {
         sendJson(response, 200, {
           gemini: {
             configured: Boolean(settings.gemini?.apiKey),
-            model: settings.gemini?.model ?? "gemini-2.5-flash",
+            model: geminiModelFor(settings),
           },
           superset: {
             configured: Boolean(settings.superset?.endpoint && settings.superset?.accessToken),
@@ -371,7 +641,7 @@ const server = createServer(async (request, response) => {
             sendJson(response, 400, { message: "Save a Gemini API key before testing the connection." });
             return;
           }
-          const model = settings.gemini.model ?? "gemini-2.5-flash";
+          const model = geminiModelFor(settings);
           const result = await fetch(
             `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}`,
             { headers: { "x-goog-api-key": settings.gemini.apiKey }, signal: timeout }
@@ -607,7 +877,7 @@ const server = createServer(async (request, response) => {
     const title = typeof values.title === "string" ? values.title.trim() : "";
     const description = typeof values.description === "string" ? values.description.trim() : "";
     const imageUrl = typeof values.imageUrl === "string" ? values.imageUrl.trim() : null;
-    let status = values.status ?? "todo";
+    const status = values.status ?? "todo";
     const subsystem = values.subsystem ?? "admin";
     const priority = values.priority ?? "p2";
     const assigneeId = values.assigneeId ?? null;
@@ -648,18 +918,6 @@ const server = createServer(async (request, response) => {
     }
 
     try {
-      let isAiTask = false;
-      if (assigneeId) {
-        const [assignee] = await sql`
-          SELECT role, full_name AS "fullName"
-          FROM users
-          WHERE id = ${assigneeId}
-        `;
-        isAiTask =
-          assignee?.role === "ai" ||
-          ["ии", "ai", "jarvis"].includes(assignee?.fullName?.trim().toLowerCase());
-      }
-      if (isAiTask) status = "todo";
       const imageColumn = hasImageUrl ? sql`, image_url` : sql``;
       const imageValue = hasImageUrl ? sql`, ${imageUrl}` : sql``;
       const assigneeColumn = hasAssigneeId ? sql`, assignee_id` : sql``;
@@ -667,7 +925,7 @@ const server = createServer(async (request, response) => {
       const [task] = await sql`
         WITH created_task AS (
         INSERT INTO tasks (title, description${imageColumn}, status, subsystem, priority${assigneeColumn}, ai_status)
-        VALUES (${title}, ${description || null}${imageValue}, ${status}, ${subsystem}, ${priority}${assigneeValue}, ${isAiTask ? "queued" : "none"})
+        VALUES (${title}, ${description || null}${imageValue}, ${status}, ${subsystem}, ${priority}${assigneeValue}, 'none')
         RETURNING ${sql.unsafe(taskColumns)}
         ), awarded_points AS (
           INSERT INTO task_completion_points (task_id, user_id, points)
@@ -781,48 +1039,14 @@ const server = createServer(async (request, response) => {
       const [existingTask] = await sql`
         SELECT
           task.status::text AS status,
-          ${hasAssigneeId ? sql`task.assignee_id` : sql`NULL::uuid`} AS "assigneeId",
-          ${hasAssigneeId ? sql`responsible.role` : sql`NULL::text`} AS "assigneeRole",
-          ${hasAssigneeId ? sql`responsible.full_name` : sql`NULL::text`} AS "assigneeName",
-          task.ai_status AS "aiStatus"
+          task.id
         FROM tasks task
-        ${hasAssigneeId ? sql`LEFT JOIN users responsible ON responsible.id = task.assignee_id` : sql``}
         WHERE task.id = ${taskId}
       `;
       if (!existingTask) {
         sendJson(response, 404, { message: "Task not found." });
         return;
       }
-
-      const wasAiTask =
-        existingTask.assigneeRole === "ai" ||
-        ["ии", "ai", "jarvis"].includes(existingTask.assigneeName?.trim().toLowerCase());
-      let isAiTask = wasAiTask;
-      if (Object.hasOwn(values, "assigneeId")) {
-        if (values.assigneeId === null) {
-          isAiTask = false;
-        } else if (values.assigneeId === existingTask.assigneeId) {
-          isAiTask = wasAiTask;
-        } else {
-          const [assignee] = await sql`
-            SELECT role, full_name AS "fullName"
-            FROM users
-            WHERE id = ${values.assigneeId}
-          `;
-          isAiTask =
-            assignee?.role === "ai" ||
-            ["ии", "ai", "jarvis"].includes(assignee?.fullName?.trim().toLowerCase());
-        }
-      }
-      const nextStatus =
-        isAiTask && !wasAiTask && Object.hasOwn(values, "assigneeId")
-          ? "todo"
-          : values.status ?? null;
-      const nextAiStatus = isAiTask
-        ? wasAiTask
-          ? existingTask.aiStatus
-          : "queued"
-        : "none";
 
       if (
         values.aiResult !== undefined &&
@@ -835,9 +1059,9 @@ const server = createServer(async (request, response) => {
       if (
         values.aiCode !== undefined &&
         values.aiCode !== null &&
-        (typeof values.aiCode !== "string" || values.aiCode.length > 500_000)
+        (typeof values.aiCode !== "string" || values.aiCode.length > 1_500_000)
       ) {
-        sendJson(response, 400, { message: "AI code must be text no longer than 500 KB." });
+        sendJson(response, 400, { message: "AI code must be text no longer than 1.5 MB." });
         return;
       }
 
@@ -849,7 +1073,7 @@ const server = createServer(async (request, response) => {
         ), updated_task AS (
           UPDATE tasks
           SET
-            status = COALESCE(${nextStatus}, status),
+            status = COALESCE(${values.status ?? null}, status),
             title = COALESCE(${values.title ?? null}, title),
             description = CASE
               WHEN ${Object.hasOwn(values, "description")} THEN ${values.description ?? null}
@@ -861,7 +1085,6 @@ const server = createServer(async (request, response) => {
             ${hasAssigneeId ? sql`assignee_id = CASE WHEN ${Object.hasOwn(values, "assigneeId")} THEN ${values.assigneeId ?? null} ELSE assignee_id END,` : sql``}
             ai_result = CASE WHEN ${Object.hasOwn(values, "aiResult")} THEN ${values.aiResult ?? null} ELSE ai_result END,
             ai_code = CASE WHEN ${Object.hasOwn(values, "aiCode")} THEN ${values.aiCode ?? null} ELSE ai_code END,
-            ai_status = ${nextAiStatus},
             updated_at = now()
           WHERE id = ${taskId}
           RETURNING ${sql.unsafe(taskColumns)}
